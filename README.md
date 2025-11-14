@@ -1,471 +1,407 @@
-# Ubuntu Server Autoinstall - Dagu Worker (Terraform Template)
+# Ubuntu Server Autoinstall Templates
 
-Autoinstall-konfiguration för Ubuntu Server som används som Terraform-template för att deploya Dagu Worker-noder.
+A collection of cloud-init/autoinstall templates for automated Ubuntu Server deployments across multiple cloud providers.
 
-## Översikt
+## Overview
 
-Detta projekt tillhandahåller en autoinstall-konfiguration för Ubuntu Server som används tillsammans med Terraform för automatisk deployment av Dagu Worker-noder. Alla känsliga credentials hanteras via Bitwarden Secrets Manager och injiceras av Terraform vid deployment-tillfället.
+This repository contains reusable cloud-init templates for deploying Ubuntu Server instances with pre-configured software, services, and settings. Templates use placeholders that can be replaced at deployment time via Terraform, allowing for secure secrets management and dynamic configuration.
 
-## Deployment-flöde
+## What is Cloud-Init / Autoinstall?
+
+[Cloud-init](https://cloudinit.readthedocs.io/) is the industry-standard method for cloud instance initialization. It enables automated configuration of Ubuntu Server instances during first boot, including:
+
+- User creation and SSH key management
+- Package installation
+- Service configuration
+- Network setup
+- Custom scripts and commands
+
+## Templates
+
+### Available Templates
+
+| Template | Description | Use Case |
+|----------|-------------|----------|
+| `dagu-worker.yaml` | Dagu distributed workflow worker | Workflow orchestration |
+
+### Template Structure
+
+Each template is a cloud-init configuration file with placeholders for dynamic values:
+
+```yaml
+#cloud-config
+hostname: HOSTNAME_PLACEHOLDER
+
+users:
+  - name: ubuntu
+    ssh_authorized_keys:
+      - SSH_PUBLIC_KEY_PLACEHOLDER
+```
+
+## Placeholder System
+
+Templates use `PLACEHOLDER_NAME` format for values that should be replaced at deployment time:
+
+| Placeholder Pattern | Purpose | Example |
+|---------------------|---------|---------|
+| `WORKER_NAME_PLACEHOLDER` | Instance/hostname | `web-01`, `db-master` |
+| `SSH_PUBLIC_KEY_PLACEHOLDER` | SSH public key | `ssh-ed25519 AAAA...` |
+| `TAILSCALE_AUTHKEY_PLACEHOLDER` | Tailscale auth key | `tskey-auth-xxx...` |
+| `API_TOKEN_PLACEHOLDER` | API tokens | `sk_live_xxx...` |
+
+### Adding Custom Placeholders
+
+1. Use descriptive, uppercase names with `_PLACEHOLDER` suffix
+2. Document all placeholders in template comments
+3. Never commit actual secrets - only placeholders
+
+## Usage
+
+### Method 1: Terraform (Recommended)
+
+Use Terraform's `data "http"` and `replace()` functions to fetch and process templates:
+
+```hcl
+# Fetch template from GitHub
+data "http" "template" {
+  url = "https://raw.githubusercontent.com/webmarcus/autoinstall/main/your-template.yaml"
+}
+
+# Process placeholders
+data "cloudinit_config" "instance" {
+  gzip          = false
+  base64_encode = false
+
+  part {
+    content_type = "text/cloud-config"
+    content = replace(
+      replace(
+        data.http.template.response_body,
+        "HOSTNAME_PLACEHOLDER",
+        "web-01"
+      ),
+      "SSH_PUBLIC_KEY_PLACEHOLDER",
+      var.ssh_public_key
+    )
+  }
+}
+
+# Deploy instance
+resource "hcloud_server" "instance" {
+  name      = "web-01"
+  user_data = data.cloudinit_config.instance.rendered
+  # ...
+}
+```
+
+### Method 2: Manual Deployment
+
+For one-off deployments without Terraform:
+
+```bash
+# 1. Download template
+curl -o template.yaml https://raw.githubusercontent.com/webmarcus/autoinstall/main/your-template.yaml
+
+# 2. Replace placeholders
+sed -i "s/HOSTNAME_PLACEHOLDER/web-01/g" template.yaml
+sed -i "s|SSH_PUBLIC_KEY_PLACEHOLDER|$(cat ~/.ssh/id_ed25519.pub)|g" template.yaml
+
+# 3. Deploy via cloud provider
+hcloud server create \
+  --name web-01 \
+  --type cx21 \
+  --image ubuntu-24.04 \
+  --user-data-from-file template.yaml
+```
+
+## Secrets Management
+
+**Never commit secrets to this repository!** Use placeholders and inject secrets at deployment time.
+
+### Recommended Approach: Bitwarden Secrets Manager
+
+```hcl
+# Terraform example with Bitwarden
+provider "bws" {
+  access_token = var.bws_access_token
+}
+
+module "secrets" {
+  source = "../modules/bitwarden-secrets"
+
+  secrets = {
+    tailscale_authkey = var.bitwarden_secret_id_tailscale
+    ssh_public_key    = var.bitwarden_secret_id_ssh
+  }
+}
+
+# Use secrets in template processing
+content = replace(
+  data.http.template.response_body,
+  "TAILSCALE_AUTHKEY_PLACEHOLDER",
+  module.secrets.values["tailscale_authkey"]
+)
+```
+
+### Alternative: Environment Variables
+
+```bash
+# Load secrets from environment
+export SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+export API_TOKEN="sk_live_xxx"
+
+# Replace in template
+envsubst < template.yaml > configured.yaml
+```
+
+## Cloud Provider Support
+
+Templates are designed to work with any cloud provider that supports cloud-init:
+
+- **Hetzner Cloud** - Native cloud-init support via `user_data`
+- **AWS EC2** - Via `user_data` parameter
+- **Google Cloud** - Via `metadata.user-data`
+- **Azure** - Via `custom_data` parameter
+- **DigitalOcean** - Via `user_data`
+- **Linode** - Via `stackscripts` or `metadata`
+
+## Creating New Templates
+
+### Template Guidelines
+
+1. **Start minimal** - Include only essential configuration
+2. **Use placeholders** - For any dynamic or sensitive values
+3. **Document thoroughly** - Add comments explaining each section
+4. **Test locally** - Use `cloud-init schema --config-file` to validate
+5. **Keep generic** - Avoid hardcoded values specific to one deployment
+
+### Template Template
+
+```yaml
+#cloud-config
+# =============================================================================
+# Template Name: Your Template Name
+# Description: Brief description of what this configures
+# =============================================================================
+#
+# Placeholders:
+#   - HOSTNAME_PLACEHOLDER: Instance hostname
+#   - SSH_PUBLIC_KEY_PLACEHOLDER: SSH public key for authentication
+#   - YOUR_CUSTOM_PLACEHOLDER: Description of your placeholder
+#
+# =============================================================================
+
+hostname: HOSTNAME_PLACEHOLDER
+
+# User configuration
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - SSH_PUBLIC_KEY_PLACEHOLDER
+
+# System configuration
+timezone: Europe/Stockholm
+locale: en_US.UTF-8
+
+# Package installation
+packages:
+  - curl
+  - wget
+  - git
+
+# Custom commands
+runcmd:
+  - echo "Instance configured successfully"
+```
+
+### Validation
+
+```bash
+# Install cloud-init
+sudo apt install cloud-init
+
+# Validate template syntax
+cloud-init schema --config-file your-template.yaml
+
+# Test locally (dry-run)
+cloud-init analyze show
+```
+
+## Deployment Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. Terraform (Lokal maskin)                                │
-│    - Hämtar secrets från Bitwarden                         │
-│    - Läser worker.yaml template                            │
-│    - Ersätter placeholders med secrets                     │
-│    - Deployer VM med modifierad config                     │
+│ 1. Template Repository (GitHub)                             │
+│    - Store templates with placeholders                      │
+│    - Version control for all templates                      │
 └────────────────┬────────────────────────────────────────────┘
                  │
-                 │ Cloud Provider API (Hetzner/AWS/GCP)
+                 │ HTTP GET
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 2. Cloud Provider                                           │
-│    - Skapar VM med worker.yaml som user-data              │
+│ 2. Terraform / Deployment Tool                              │
+│    - Fetch template from GitHub                             │
+│    - Retrieve secrets from secure storage                   │
+│    - Replace placeholders with actual values                │
+│    - Generate cloud-init config                             │
+└────────────────┬────────────────────────────────────────────┘
+                 │
+                 │ Cloud Provider API
+                 ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Cloud Provider                                           │
+│    - Create VM with cloud-init as user-data                 │
 └────────────────┬────────────────────────────────────────────┘
                  │
                  │ VM Boot
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. Autoinstall (First Boot)                                │
-│    - Installerar Ubuntu Server (minimal)                   │
-│    - Konfigurerar timezone, locale, keyboard               │
-│    - Skapar användare (marcus)                             │
-│    - Installerar Tailscale och registrerar i mesh          │
-│    - Installerar Docker och Docker Compose                 │
-│    - Installerar Dagu worker (headless mode)               │
-│    - Konfigurerar systemd services                         │
-│    - Startar alla services                                 │
-│    - Skapar status marker: /var/lib/dagu-worker/status    │
+│ 4. Cloud-Init (First Boot)                                  │
+│    - Execute cloud-init configuration                       │
+│    - Install packages                                       │
+│    - Configure services                                     │
+│    - Run custom commands                                    │
+│    - Mark deployment complete                               │
 └────────────────┬────────────────────────────────────────────┘
                  │
-                 │ 5-10 minuter
+                 │ 2-10 minutes
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 4. Redo för Ansible!                                       │
-│    - Worker synlig i Tailscale mesh (tag:dagu-worker)     │
-│    - Auto-discoverable via Ansible dynamic inventory       │
-│    - Klar för NFS mount och final konfiguration           │
+│ 5. Ready for Use / Post-Configuration                       │
+│    - Instance fully configured and operational              │
+│    - Ready for Ansible/management tools                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Förutsättningar
+## Post-Deployment Verification
 
-### 1. Cloud Provider Account
-
-- **Hetzner Cloud** (primär): [console.hetzner.cloud](https://console.hetzner.cloud/)
-- **AWS EC2** (sekundär): AWS account med EC2 access
-- **GCP Compute** (sekundär): GCP project med Compute Engine API
-
-### 2. Terraform
+### Check Cloud-Init Status
 
 ```bash
-# macOS
-brew install terraform
+# SSH to instance
+ssh ubuntu@instance-hostname
 
-# Linux
-wget https://releases.hashicorp.com/terraform/1.7.0/terraform_1.7.0_linux_amd64.zip
-unzip terraform_1.7.0_linux_amd64.zip
-sudo mv terraform /usr/local/bin/
+# Check cloud-init status
+cloud-init status
+
+# Expected output: "status: done"
+
+# View detailed logs
+sudo journalctl -u cloud-init-local
+sudo journalctl -u cloud-init
+sudo journalctl -u cloud-init-config
+sudo journalctl -u cloud-init-final
+
+# Check for errors
+cloud-init analyze show
 ```
 
-### 3. Bitwarden Secrets Manager
+### Common Issues
 
-- Aktivt Bitwarden-konto med Secrets Manager
-- Machine Account skapad
-- Access Token genererat
-- Bitwarden SDK installerat: `pip3 install bitwarden-sdk`
-
-### 4. Secrets i Bitwarden
-
-Följande secrets måste finnas i Bitwarden:
-
-| Secret Name | Beskrivning | Exempel |
-|-------------|-------------|---------|
-| `tailscale_authkey_workers` | Tailscale ephemeral auth key med tag:dagu-worker | `tskey-auth-xxx...` |
-| `SSH Public Key` (optional) | Din SSH public key | `ssh-ed25519 AAAA...` |
-
-## Placeholders i worker.yaml
-
-Terraform ersätter följande placeholders med faktiska värden:
-
-| Placeholder | Ersätts med | Källa |
-|-------------|-------------|-------|
-| `WORKER_NAME_PLACEHOLDER` | Unique worker namn | Terraform variable |
-| `TAILSCALE_AUTHKEY_PLACEHOLDER` | Tailscale auth key | Bitwarden secret |
-| `SSH_PUBLIC_KEY_PLACEHOLDER` | SSH public key | Bitwarden secret eller Terraform variable |
-
-## Deployment
-
-### Metod 1: Via Terraform (Rekommenderat)
-
-**Steg 1**: Konfigurera Terraform
-
+**Cloud-init still running**
 ```bash
-cd terraform/dagu-worker
+# Wait for completion
+cloud-init status --wait
 
-# Kopiera example config
-cp terraform.tfvars.example terraform.tfvars
-
-# Uppdatera med dina Bitwarden Secret IDs
-vim terraform.tfvars
+# Force completion (not recommended)
+sudo cloud-init clean --reboot
 ```
 
-**Steg 2**: Exportera Environment Variables
-
+**Package installation failed**
 ```bash
-# Hetzner Cloud token
-export HCLOUD_TOKEN="your-hetzner-token"
+# Check cloud-init logs
+sudo cat /var/log/cloud-init.log
 
-# Bitwarden access token
-export BWS_ACCESS_TOKEN="your-bitwarden-token"
+# Manually retry
+sudo cloud-init modules --mode final
 ```
 
-**Steg 3**: Deploy Worker
+## Security Best Practices
 
-```bash
-# Använd deployment script
-./deploy-worker.sh dagu-worker-01
+### DO ✅
 
-# Eller direkt med Terraform
-terraform init
-terraform plan -var="worker_name=dagu-worker-01"
-terraform apply -var="worker_name=dagu-worker-01"
+- Store secrets in Bitwarden Secrets Manager or similar
+- Use placeholders for all sensitive values
+- Inject secrets at deployment time via Terraform
+- Disable password authentication
+- Use SSH key-based authentication only
+- Review templates before deploying to production
+- Validate cloud-init syntax before deployment
+
+### DON'T ❌
+
+- Commit secrets to version control
+- Hardcode API tokens or passwords
+- Leave default passwords in templates
+- Store unencrypted secrets in cloud provider metadata
+- Skip validation steps
+- Use root login with password authentication
+
+## Integration Examples
+
+### With Terraform Modules
+
+```hcl
+module "web_servers" {
+  source = "../modules/compute-hcloud"
+
+  servers = {
+    for i in range(3) : "web-${i + 1}" => {
+      server_type = "cx21"
+      location    = "hel1"
+      image       = "ubuntu-24.04"
+      user_data   = replace(
+        data.http.web_template.response_body,
+        "HOSTNAME_PLACEHOLDER",
+        "web-${i + 1}"
+      )
+    }
+  }
+}
 ```
 
-Se [Terraform README](../terraform/dagu-worker/README.md) för fullständig dokumentation.
-
-### Metod 2: Via Cloud Provider UI (Manuell)
-
-Om du vill deploya manuellt utan Terraform:
-
-**Steg 1**: Hämta secrets från Bitwarden
-
-```bash
-# Installera bws CLI
-pip3 install bitwarden-sdk
-
-# Exportera access token
-export BWS_ACCESS_TOKEN="your-token"
-
-# Hämta Tailscale key
-TAILSCALE_KEY=$(bws secret get a71eebe6-fc6f-4bfb-969a-b38c016e0795 --output json | jq -r '.value')
-
-# Hämta SSH key (optional)
-SSH_KEY=$(bws secret get your-ssh-key-secret-id --output json | jq -r '.value')
-```
-
-**Steg 2**: Ersätt placeholders i worker.yaml
-
-```bash
-# Skapa working copy
-cp autoinstall/worker.yaml /tmp/worker-configured.yaml
-
-# Ersätt placeholders
-sed -i "s/WORKER_NAME_PLACEHOLDER/dagu-worker-01/g" /tmp/worker-configured.yaml
-sed -i "s|TAILSCALE_AUTHKEY_PLACEHOLDER|${TAILSCALE_KEY}|g" /tmp/worker-configured.yaml
-sed -i "s|SSH_PUBLIC_KEY_PLACEHOLDER|${SSH_KEY}|g" /tmp/worker-configured.yaml
-```
-
-**Steg 3**: Deploy via cloud provider
-
-```bash
-# Hetzner Cloud
-hcloud server create \
-  --name dagu-worker-01 \
-  --type cx31 \
-  --location hel1 \
-  --image ubuntu-24.04 \
-  --user-data-from-file /tmp/worker-configured.yaml
-
-# AWS EC2
-aws ec2 run-instances \
-  --image-id ami-xxx \
-  --instance-type t3.medium \
-  --user-data file:///tmp/worker-configured.yaml
-
-# GCP Compute
-gcloud compute instances create dagu-worker-01 \
-  --machine-type n1-standard-2 \
-  --image-family ubuntu-2404-lts \
-  --image-project ubuntu-os-cloud \
-  --metadata-from-file user-data=/tmp/worker-configured.yaml
-```
-
-## Post-Installation
-
-### 1. Vänta på Autoinstall (5-10 minuter)
-
-Workern bootar och kör autoinstall. Detta tar cirka 5-10 minuter.
-
-```bash
-# Följ via Tailscale
-tailscale status | grep dagu-worker-01
-
-# Efter 2-3 minuter ska workern dyka upp
-```
-
-### 2. Verifiera Installation
-
-```bash
-# SSH till workern (via Tailscale)
-ssh dagu-worker-01
-
-# Kontrollera deployment status
-cat /var/lib/dagu-worker/status
-
-# Expected output:
-# DEPLOYED_AT=2025-11-12T10:30:00Z
-# WORKER_NAME=dagu-worker-01
-# STATUS=ready
-```
-
-### 3. Verifiera Services
-
-```bash
-# Tailscale
-tailscale status
-
-# Docker
-sudo systemctl status docker
-docker ps
-
-# Dagu
-sudo systemctl status dagu
-sudo journalctl -u dagu -f
-
-# Dagu config
-cat /etc/dagu/config.yaml
-```
-
-### 4. Kör Ansible Provisioning
-
-```bash
-cd ansible/ansible-playbooks
-
-# Verifiera att workern är discoverable
-ansible-inventory --graph | grep dagu-worker-01
-
-# Kör provisioning
-ansible-playbook dagu-workers.yml --limit dagu-worker-01
-```
-
-Ansible konfigurerar:
-- NFS client och mount coordinator shares
-- Fine-tuning av Dagu konfiguration
-- Monitoring och logging
-
-## Vad Installeras
-
-### Packages
-- `python3`, `python3-pip`, `git`, `curl`, `wget`
-- `docker.io`, `docker-compose`
-- `nfs-common` (för coordinator mounts)
-- `tailscale` (via install script)
-- `dagu` binary (via GitHub release)
-
-### System Configuration
-- Timezone: Europe/Stockholm
-- Locale: en_US.UTF-8
-- Keyboard: Swedish (se)
-- User: marcus (sudo without password)
-- SSH: Key-based only, password auth disabled
-
-### Directories
-- `/opt/dagu/dags` - DAG definitions (NFS mount från coordinator)
-- `/opt/dagu/logs` - Execution logs (NFS mount från coordinator)
-- `/opt/dagu/data` - Worker data
-- `/etc/dagu/config.yaml` - Dagu configuration
-- `/var/lib/dagu-worker/status` - Deployment status
-
-### Services
-- `tailscaled.service` - Tailscale daemon
-- `docker.service` - Docker engine
-- `dagu.service` - Dagu worker
-
-### Network
-- Tailscale mesh networking (tag:dagu-worker)
-- DHCP för public interface
-- Optional: Private networking via cloud provider
-
-## Dagu Worker Configuration
-
-Worker körs i **headless mode** och ansluter till coordinator via gRPC:
+### With Ansible Post-Provisioning
 
 ```yaml
-# /etc/dagu/config.yaml
-host: 0.0.0.0
-port: 8080
-headless: true
+# After cloud-init completes, run Ansible for advanced configuration
+---
+- name: Post-provision web servers
+  hosts: web_servers
+  tasks:
+    - name: Wait for cloud-init to complete
+      command: cloud-init status --wait
+      changed_when: false
 
-distributed:
-  mode: worker
-  coordinatorHost: dagu-coordinator
-  coordinatorPort: 50051
-
-worker:
-  id: WORKER_NAME_PLACEHOLDER
-  maxActiveRuns: 100
-  labels:
-    region: eu-north-1
-    type: general
-    cloud: hetzner
-
-dags: /opt/dagu/dags
-logs: /opt/dagu/logs
-data: /opt/dagu/data
+    - name: Apply advanced configuration
+      # ... your Ansible tasks
 ```
 
-## Troubleshooting
+## Contributing
 
-### Worker dyker inte upp i Tailscale
+### Adding a New Template
 
-**Symptom**: Worker syns inte i `tailscale status` efter 5-10 minuter
+1. Create template file with descriptive name (e.g., `postgres-primary.yaml`)
+2. Use placeholders for all dynamic values
+3. Document placeholders in template comments
+4. Update this README with template description
+5. Test template with cloud-init validation
+6. Submit pull request
 
-**Lösning**:
-1. Kontrollera via cloud provider console att VM:en är running
-2. Kolla cloud-init logs via console/serial port
-3. SSH med public IP (temporary):
-   ```bash
-   ssh root@<public-ip>
-   sudo journalctl -u cloud-init -f
-   ```
+### Template Naming Convention
 
-### Tailscale auth key expired
+- Use lowercase with hyphens
+- Be descriptive and specific
+- Include role/purpose in name
+- Examples: `web-server.yaml`, `redis-cluster.yaml`, `k8s-worker.yaml`
 
-**Symptom**: `tailscale up` failar med "invalid auth key"
+## Resources
 
-**Lösning**:
-1. Skapa ny ephemeral key i [Tailscale Admin Console](https://login.tailscale.com/admin/settings/keys)
-2. Uppdatera secret i Bitwarden
-3. Re-deploy worker
-
-### Dagu inte running
-
-**Symptom**: `systemctl status dagu` visar "failed"
-
-**Lösning**:
-```bash
-# Kolla logs
-sudo journalctl -u dagu -n 50
-
-# Verifiera binary
-which dagu
-dagu version
-
-# Testa manuellt
-sudo -u marcus dagu start-all
-
-# Restart service
-sudo systemctl restart dagu
-```
-
-### NFS mount saknas
-
-**Symptom**: `/opt/dagu/dags` är tom
-
-**Lösning**:
-Detta är förväntat! NFS mounts konfigureras av Ansible, inte autoinstall.
-
-```bash
-# Kör Ansible provisioning
-cd ansible/ansible-playbooks
-ansible-playbook dagu-workers.yml --limit <worker-name>
-```
-
-## Säkerhet
-
-### Secrets Management
-
-- ✅ Alla secrets i Bitwarden Secrets Manager
-- ✅ Secrets injiceras av Terraform vid deployment
-- ✅ Inga secrets committas i version control
-- ✅ Inga secrets lagras i cloud provider metadata
-- ✅ worker.yaml template innehåller endast placeholders
-
-### SSH Access
-
-- ✅ Primary: Tailscale SSH (MagicDNS + ACLs)
-- ✅ Secondary: SSH keys (emergency access)
-- ✅ Password authentication disabled
-- ✅ Only key-based authentication
-
-### Network Security
-
-- ✅ Tailscale mesh networking (end-to-end encrypted)
-- ✅ Workers endast tillgängliga via Tailscale
-- ✅ Optional: Cloud firewall för public interface
-- ✅ Optional: Private networking för intern trafik
-
-## Struktur
-
-```
-autoinstall/
-├── README.md              # Denna fil
-└── worker.yaml            # Autoinstall template (med placeholders)
-
-terraform/
-└── dagu-worker/
-    ├── main.tf            # Terraform main configuration
-    ├── variables.tf       # Input variables
-    ├── outputs.tf         # Outputs
-    ├── versions.tf        # Provider versions
-    ├── deploy-worker.sh   # Deployment script
-    ├── terraform.tfvars.example
-    └── README.md          # Terraform documentation
-
-ansible/
-└── ansible-playbooks/
-    ├── dagu-workers.yml   # Ansible provisioning playbook
-    └── group_vars/
-        └── dagu_workers.yml
-```
-
-## Relaterade Projekt
-
-- **Terraform Configuration**: `../terraform/dagu-worker/`
-  - Deployment automation med Bitwarden integration
-  - Support för Hetzner, AWS, GCP
-
-- **Ansible Playbooks**: `../ansible/ansible-playbooks/`
-  - `dagu-workers.yml` - Post-deployment provisioning
-  - `group_vars/dagu_workers.yml` - Worker configuration
-  - `group_vars/all/vault.yml` - Bitwarden secrets
-
-- **Ansible Collections**:
-  - `webmarcus.dagu` - Dagu installation och konfiguration
-  - `webmarcus.nfs` - NFS client konfiguration
-  - `freeformz.ansible` - Tailscale dynamic inventory
-
-## Support
-
-### Logs
-
-```bash
-# Cloud-init (autoinstall)
-sudo journalctl -u cloud-init -f
-
-# Tailscale
-sudo journalctl -u tailscaled -f
-
-# Docker
-sudo journalctl -u docker -f
-
-# Dagu
-sudo journalctl -u dagu -f
-```
-
-### Documentation
-
-- **Post-Install README**: `/root/POST-INSTALL-README.md` (på servern)
-- **Terraform README**: `../terraform/dagu-worker/README.md`
-- **Ansible README**: `../ansible/ansible-playbooks/README.md`
-
-### Configuration Files
-
-- **Dagu Config**: `/etc/dagu/config.yaml`
-- **Dagu Service**: `/etc/systemd/system/dagu.service`
-- **Deployment Status**: `/var/lib/dagu-worker/status`
+- [Cloud-Init Documentation](https://cloudinit.readthedocs.io/)
+- [Cloud-Init Examples](https://cloudinit.readthedocs.io/en/latest/reference/examples.html)
+- [Ubuntu Server Guide](https://ubuntu.com/server/docs)
+- [Terraform Cloud-Init Provider](https://registry.terraform.io/providers/hashicorp/cloudinit/latest/docs)
 
 ## License
 
@@ -473,8 +409,5 @@ MIT
 
 ---
 
-**Version**: 2.0.0 (Terraform Template Approach)
-**Last Updated**: 2025-11-12
-**Deployment Method**: Terraform + Autoinstall
-**Secrets Management**: Bitwarden Secrets Manager
-**Provisioning**: Cloud-Init + Ansible
+**Maintained by**: webmarcus
+**Repository**: https://github.com/webmarcus/autoinstall

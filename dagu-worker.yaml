@@ -1,0 +1,440 @@
+#cloud-config
+# ==============================================================================
+# Ubuntu Server Autoinstall - Dagu Worker (Terraform Template)
+# ==============================================================================
+#
+# This autoinstall configuration is designed to be used with Terraform.
+# Terraform fetches this file from GitHub, replaces placeholders with secrets,
+# and deploys VMs with complete Dagu Worker configuration.
+#
+# PLACEHOLDERS (replaced by Terraform):
+# - WORKER_NAME_PLACEHOLDER       → Unique worker name
+# - TAILSCALE_AUTHKEY_PLACEHOLDER → Tailscale ephemeral auth key
+# - SSH_PUBLIC_KEY_PLACEHOLDER    → SSH authorized key
+#
+# Provisioning Flow:
+# 1. Terraform fetches this file from GitHub
+# 2. Terraform replaces placeholders with actual secrets
+# 3. Terraform creates VM with modified config as user-data
+# 4. VM boots → Autoinstall runs → Worker is 100% ready!
+#
+# What this autoinstall does:
+# - Installs Ubuntu Server (minimal)
+# - Configures timezone (Europe/Stockholm)
+# - Creates admin user (marcus)
+# - Installs Tailscale and registers with tag:dagu-worker
+# - Installs Docker and Docker Compose
+# - Installs Dagu worker (headless mode)
+# - Configures NFS client for coordinator mounts
+# - Starts all services automatically
+#
+# Deployment:
+#   Via Terraform:
+#     terraform apply -var="worker_type=cx31" -var="location=hel1"
+#
+#   Via deploy script:
+#     ./deploy-worker.sh
+#
+# No manual configuration needed - everything is automated!
+#
+# ==============================================================================
+
+autoinstall:
+  version: 1
+
+  # ============================================================================
+  # Locale and Keyboard
+  # ============================================================================
+  locale: en_US.UTF-8
+  keyboard:
+    layout: se
+    variant: ''
+
+  # ============================================================================
+  # Timezone
+  # ============================================================================
+  timezone: Europe/Stockholm
+
+  # ============================================================================
+  # Network Configuration
+  # ============================================================================
+  # Use DHCP for initial network setup
+  # Tailscale will provide the overlay network
+  network:
+    version: 2
+    ethernets:
+      ens18:  # Adjust interface name as needed
+        dhcp4: true
+        dhcp6: false
+
+  # ============================================================================
+  # Storage Configuration
+  # ============================================================================
+  # Use entire disk with LVM
+  storage:
+    layout:
+      name: lvm
+      match:
+        size: largest
+
+  # ============================================================================
+  # SSH Configuration
+  # ============================================================================
+  ssh:
+    install-server: true
+    allow-pw: false  # Only key-based authentication
+
+  # ============================================================================
+  # User Configuration
+  # ============================================================================
+  # NOTE: WORKER_NAME_PLACEHOLDER and SSH_PUBLIC_KEY_PLACEHOLDER replaced by Terraform
+  identity:
+    hostname: WORKER_NAME_PLACEHOLDER
+    username: marcus
+    # Password hash (change if needed): mkpasswd -m sha-512
+    password: '$6$rounds=4096$saltsalt$5wBmxyz9LZI8qOuE.Zn9L1m8f3g2h4j5k6l7m8n9o0p1q2r3s4t5u6v7w8x9y0z1'
+    ssh_authorized_keys:
+      - SSH_PUBLIC_KEY_PLACEHOLDER
+
+  # ============================================================================
+  # Package Selection
+  # ============================================================================
+  # Install minimal packages during installation
+  packages:
+    - python3
+    - python3-pip
+    - git
+    - curl
+    - wget
+    - ca-certificates
+    - gnupg
+    - apt-transport-https
+    - lsb-release
+    - openssh-server
+    - sudo
+    - vim
+    - htop
+    - net-tools
+    - jq
+    - nfs-common
+    - docker.io
+    - docker-compose
+
+  # ============================================================================
+  # Late Commands (Run after installation)
+  # ============================================================================
+  # These commands run in the installer environment (chroot)
+  late-commands:
+    # Configure sudo without password for marcus
+    - echo 'marcus ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/marcus
+    - chmod 440 /target/etc/sudoers.d/marcus
+
+    # Install Tailscale
+    - curtin in-target --target=/target -- bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+
+    # Add marcus to docker group
+    - curtin in-target --target=/target -- usermod -aG docker marcus
+
+    # Disable swap (recommended for containerized workloads)
+    - curtin in-target --target=/target -- swapoff -a
+    - curtin in-target --target=/target -- sed -i '/ swap / s/^/#/' /etc/fstab
+
+    # Set up system journal size limits
+    - curtin in-target --target=/target -- sed -i 's/#SystemMaxUse=/SystemMaxUse=500M/' /etc/systemd/journald.conf
+
+    # Enable BBR congestion control (better network performance)
+    - echo 'net.core.default_qdisc=fq' >> /target/etc/sysctl.d/99-bbr.conf
+    - echo 'net.ipv4.tcp_congestion_control=bbr' >> /target/etc/sysctl.d/99-bbr.conf
+
+    # Install Dagu binary
+    - curtin in-target --target=/target -- bash -c 'curl -L https://github.com/dagu-dev/dagu/releases/latest/download/dagu_linux_amd64.tar.gz | tar xz -C /usr/local/bin'
+
+    # Create Dagu directories
+    - curtin in-target --target=/target -- mkdir -p /opt/dagu/{dags,logs,data} /etc/dagu
+    - curtin in-target --target=/target -- chown -R marcus:marcus /opt/dagu
+
+    # Create marker file for post-install configuration
+    - touch /target/root/.autoinstall-complete
+
+  # ============================================================================
+  # User Data (Cloud-init)
+  # ============================================================================
+  # Additional cloud-init configuration
+  user-data:
+    # Preserve hostname set during installation
+    preserve_hostname: false
+
+    # Configure package updates
+    package_update: true
+    package_upgrade: true
+    package_reboot_if_required: true
+
+    # Tailscale and Dagu configuration
+    # NOTE: TAILSCALE_AUTHKEY_PLACEHOLDER and WORKER_NAME_PLACEHOLDER replaced by Terraform
+    runcmd:
+      # Configure Tailscale with placeholder (replaced by Terraform)
+      - tailscale up --authkey=TAILSCALE_AUTHKEY_PLACEHOLDER --ssh --accept-routes --accept-dns --advertise-tags=tag:dagu-worker --hostname=WORKER_NAME_PLACEHOLDER
+
+      # Enable and start Docker
+      - systemctl enable docker
+      - systemctl start docker
+
+      # Enable and start Dagu
+      - systemctl daemon-reload
+      - systemctl enable dagu
+      - systemctl start dagu
+
+      # Wait for Tailscale to be ready
+      - timeout 30 bash -c 'until tailscale status; do sleep 1; done'
+
+      # Create ready marker
+      - mkdir -p /var/lib/dagu-worker
+      - echo "DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /var/lib/dagu-worker/status
+      - echo "WORKER_NAME=WORKER_NAME_PLACEHOLDER" >> /var/lib/dagu-worker/status
+      - echo "STATUS=ready" >> /var/lib/dagu-worker/status
+
+    # Write additional configuration files
+    write_files:
+      # Dagu worker configuration
+      - path: /etc/dagu/config.yaml
+        content: |
+          # Dagu Worker Configuration
+          host: 0.0.0.0
+          port: 8080
+          headless: true
+
+          # Distributed mode - Worker
+          distributed:
+            mode: worker
+            coordinatorHost: dagu-coordinator
+            coordinatorPort: 50051
+
+          # Worker identity
+          worker:
+            id: WORKER_NAME_PLACEHOLDER
+            maxActiveRuns: 100
+            labels:
+              region: eu-north-1
+              type: general
+              cloud: hetzner
+
+          # Directories
+          dags: /opt/dagu/dags
+          logs: /opt/dagu/logs
+          data: /opt/dagu/data
+        owner: root:root
+        permissions: '0644'
+
+      # Dagu systemd service
+      - path: /etc/systemd/system/dagu.service
+        content: |
+          [Unit]
+          Description=Dagu Worker
+          After=network.target tailscaled.service docker.service
+          Wants=tailscaled.service docker.service
+
+          [Service]
+          Type=simple
+          User=marcus
+          Group=marcus
+          WorkingDirectory=/opt/dagu
+          ExecStart=/usr/local/bin/dagu start-all
+          Restart=always
+          RestartSec=10
+          Environment="DAGU_CONFIG=/etc/dagu/config.yaml"
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root:root
+        permissions: '0755'
+
+      # README for post-installation
+      - path: /root/POST-INSTALL-README.md
+        content: |
+          # Dagu Worker - Post Installation
+
+          ## Overview
+
+          This Dagu Worker was deployed via Terraform with autoinstall.
+          All configuration is complete and the worker is ready to use!
+
+          ## Deployment Information
+
+          Check deployment status:
+          ```bash
+          cat /var/lib/dagu-worker/status
+          ```
+
+          This shows:
+          - DEPLOYED_AT: Timestamp of deployment
+          - WORKER_NAME: Unique worker identifier
+          - STATUS: ready
+
+          ## Verify Installation
+
+          ### 1. Check Tailscale Connection
+
+          ```bash
+          # Check Tailscale status
+          tailscale status
+
+          # Get Tailscale IP
+          tailscale ip -4
+
+          # Verify tag
+          tailscale status | grep tag:dagu-worker
+          ```
+
+          ### 2. Check Docker
+
+          ```bash
+          # Verify Docker is running
+          sudo systemctl status docker
+
+          # Test Docker
+          docker ps
+
+          # Check Docker group membership
+          groups marcus | grep docker
+          ```
+
+          ### 3. Check Dagu Service
+
+          ```bash
+          # Check service status
+          sudo systemctl status dagu
+
+          # View logs
+          sudo journalctl -u dagu -f
+
+          # Check configuration
+          cat /etc/dagu/config.yaml
+          ```
+
+          ### 4. Check NFS Mounts (After Ansible)
+
+          ```bash
+          # List NFS mounts
+          df -h | grep nfs
+
+          # Check mount points
+          ls -la /opt/dagu/dags
+          ls -la /opt/dagu/logs
+          ```
+
+          ## Configuration Files
+
+          - **Dagu Config**: `/etc/dagu/config.yaml`
+          - **Dagu Service**: `/etc/systemd/system/dagu.service`
+          - **Dagu Directories**: `/opt/dagu/{dags,logs,data}`
+          - **Deployment Status**: `/var/lib/dagu-worker/status`
+
+          ## Next Steps
+
+          This worker is now ready for Ansible provisioning:
+
+          ```bash
+          # From Ansible control node
+          cd ansible/ansible-playbooks
+
+          # Verify worker is discoverable
+          ansible-inventory --graph | grep dagu-worker
+
+          # Run provisioning
+          ansible-playbook dagu-workers.yml --limit WORKER_NAME_PLACEHOLDER
+          ```
+
+          Ansible will:
+          - Configure NFS client and mount coordinator shares
+          - Fine-tune Dagu configuration
+          - Set up monitoring and logging
+
+          ## Coordinator Connection
+
+          Worker connects to coordinator via gRPC:
+          - **Coordinator Host**: dagu-coordinator (via Tailscale)
+          - **gRPC Port**: 50051
+          - **Worker ID**: WORKER_NAME_PLACEHOLDER
+          - **Worker Labels**: region=eu-north-1, type=general, cloud=hetzner
+
+          ## Troubleshooting
+
+          ### Tailscale Not Connected
+
+          ```bash
+          # Check Tailscale daemon
+          sudo systemctl status tailscaled
+
+          # Check logs
+          sudo journalctl -u tailscaled -f
+
+          # Reconnect if needed
+          sudo tailscale down
+          sudo tailscale up
+          ```
+
+          ### Dagu Not Running
+
+          ```bash
+          # Restart service
+          sudo systemctl restart dagu
+
+          # Check logs for errors
+          sudo journalctl -u dagu -n 50
+
+          # Verify binary
+          which dagu
+          dagu version
+          ```
+
+          ### Cannot Connect to Coordinator
+
+          ```bash
+          # Test network connectivity
+          ping dagu-coordinator
+
+          # Check if coordinator is reachable
+          telnet dagu-coordinator 50051
+
+          # Verify Tailscale can resolve coordinator
+          tailscale status | grep dagu-coordinator
+          ```
+
+          ## Notes
+
+          - **Deployment Method**: Terraform + Autoinstall
+          - **Secrets Management**: Injected by Terraform at deployment
+          - **Node Type**: Dagu Worker (Headless)
+          - **Tailscale Tag**: tag:dagu-worker
+          - **Further Configuration**: Via Ansible (dagu_worker role)
+        owner: root:root
+        permissions: '0644'
+
+    # Final message
+    final_message: |
+      ╔════════════════════════════════════════════════════════════╗
+      ║    Ubuntu Server - Dagu Worker Installation Complete      ║
+      ║              Deployed via Terraform + Autoinstall          ║
+      ╚════════════════════════════════════════════════════════════╝
+
+      Worker: WORKER_NAME_PLACEHOLDER
+      Status: Ready for Ansible provisioning
+
+      Verify installation:
+        tailscale status
+        sudo systemctl status dagu
+        cat /var/lib/dagu-worker/status
+
+      Next steps:
+        Run Ansible provisioning from control node:
+        ansible-playbook dagu-workers.yml --limit WORKER_NAME_PLACEHOLDER
+
+      Documentation: /root/POST-INSTALL-README.md
+
+      System will reboot in 10 seconds...
+
+  # ============================================================================
+  # Power Management
+  # ============================================================================
+  # Reboot after installation
+  shutdown: reboot

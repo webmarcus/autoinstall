@@ -1,41 +1,23 @@
 #cloud-config
 # ==============================================================================
-# Ubuntu Server Autoinstall - Dagu Worker (Terraform Template)
+# Dagu Worker - Ubuntu Server Autoinstall Template
 # ==============================================================================
 #
-# This autoinstall configuration is designed to be used with Terraform.
-# Terraform fetches this file from GitHub, replaces placeholders with secrets,
-# and deploys VMs with complete Dagu Worker configuration.
+# Part of: github.com/webmarcus/autoinstall
+# Purpose: Deploy Dagu distributed workflow workers
 #
-# PLACEHOLDERS (replaced by Terraform):
-# - WORKER_NAME_PLACEHOLDER       → Unique worker name
-# - TAILSCALE_AUTHKEY_PLACEHOLDER → Tailscale ephemeral auth key
-# - SSH_PUBLIC_KEY_PLACEHOLDER    → SSH authorized key
+# This template is fetched from GitHub and processed by Terraform.
+# Placeholders are replaced with actual values at deployment time.
 #
-# Provisioning Flow:
-# 1. Terraform fetches this file from GitHub
-# 2. Terraform replaces placeholders with actual secrets
-# 3. Terraform creates VM with modified config as user-data
-# 4. VM boots → Autoinstall runs → Worker is 100% ready!
+# PLACEHOLDERS:
+#   WORKER_NAME_PLACEHOLDER       - Unique worker identifier
+#   TAILSCALE_AUTHKEY_PLACEHOLDER - Tailscale ephemeral auth key
+#   ADMIN_USERNAME_PLACEHOLDER    - Admin username for the instance
 #
-# What this autoinstall does:
-# - Installs Ubuntu Server (minimal)
-# - Configures timezone (Europe/Stockholm)
-# - Creates admin user (marcus)
-# - Installs Tailscale and registers with tag:dagu-worker
-# - Installs Docker and Docker Compose
-# - Installs Dagu worker (headless mode)
-# - Configures NFS client for coordinator mounts
-# - Starts all services automatically
-#
-# Deployment:
-#   Via Terraform:
-#     terraform apply -var="worker_type=cx31" -var="location=hel1"
-#
-#   Via deploy script:
-#     ./deploy-worker.sh
-#
-# No manual configuration needed - everything is automated!
+# Authentication:
+#   - Tailscale SSH only (--ssh flag enabled)
+#   - No traditional SSH keys needed
+#   - Password authentication disabled
 #
 # ==============================================================================
 
@@ -87,14 +69,13 @@ autoinstall:
   # ============================================================================
   # User Configuration
   # ============================================================================
-  # NOTE: WORKER_NAME_PLACEHOLDER and SSH_PUBLIC_KEY_PLACEHOLDER replaced by Terraform
+  # NOTE: Placeholders replaced by Terraform at deployment time
+  # Authentication via Tailscale SSH only - no password or SSH keys needed
   identity:
     hostname: WORKER_NAME_PLACEHOLDER
-    username: marcus
-    # Password hash (change if needed): mkpasswd -m sha-512
+    username: ADMIN_USERNAME_PLACEHOLDER
+    # Password hash - not used (Tailscale SSH only)
     password: '$6$rounds=4096$saltsalt$5wBmxyz9LZI8qOuE.Zn9L1m8f3g2h4j5k6l7m8n9o0p1q2r3s4t5u6v7w8x9y0z1'
-    ssh_authorized_keys:
-      - SSH_PUBLIC_KEY_PLACEHOLDER
 
   # ============================================================================
   # Package Selection
@@ -125,15 +106,15 @@ autoinstall:
   # ============================================================================
   # These commands run in the installer environment (chroot)
   late-commands:
-    # Configure sudo without password for marcus
-    - echo 'marcus ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/marcus
-    - chmod 440 /target/etc/sudoers.d/marcus
+    # Configure sudo without password for admin user
+    - echo 'ADMIN_USERNAME_PLACEHOLDER ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ADMIN_USERNAME_PLACEHOLDER
+    - chmod 440 /target/etc/sudoers.d/ADMIN_USERNAME_PLACEHOLDER
 
     # Install Tailscale
     - curtin in-target --target=/target -- bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
 
-    # Add marcus to docker group
-    - curtin in-target --target=/target -- usermod -aG docker marcus
+    # Add admin user to docker group
+    - curtin in-target --target=/target -- usermod -aG docker ADMIN_USERNAME_PLACEHOLDER
 
     # Disable swap (recommended for containerized workloads)
     - curtin in-target --target=/target -- swapoff -a
@@ -151,7 +132,7 @@ autoinstall:
 
     # Create Dagu directories
     - curtin in-target --target=/target -- mkdir -p /opt/dagu/{dags,logs,data} /etc/dagu
-    - curtin in-target --target=/target -- chown -R marcus:marcus /opt/dagu
+    - curtin in-target --target=/target -- chown -R ADMIN_USERNAME_PLACEHOLDER:ADMIN_USERNAME_PLACEHOLDER /opt/dagu
 
     # Create marker file for post-install configuration
     - touch /target/root/.autoinstall-complete
@@ -235,8 +216,8 @@ autoinstall:
 
           [Service]
           Type=simple
-          User=marcus
-          Group=marcus
+          User=ADMIN_USERNAME_PLACEHOLDER
+          Group=ADMIN_USERNAME_PLACEHOLDER
           WorkingDirectory=/opt/dagu
           ExecStart=/usr/local/bin/dagu start-all
           Restart=always
@@ -295,7 +276,7 @@ autoinstall:
           docker ps
 
           # Check Docker group membership
-          groups marcus | grep docker
+          groups ADMIN_USERNAME_PLACEHOLDER | grep docker
           ```
 
           ### 3. Check Dagu Service
